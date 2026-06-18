@@ -21,6 +21,17 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+    - name: Ensure Labels Exist
+      run: |
+        # 确保必需的标签存在，如果不存在则创建
+        for label in "sync image" "syncing" "sync image succeeded" "sync image failure"; do
+          if gh label list --json name -q ".[] | select(.name==\"$label\") | .name" | grep -q "$label"; then
+            echo "✓ 标签 '$label' 已存在"
+          else
+            echo "→ 创建标签 '$label'"
+            gh label create "$label" --color "0366d6" --force
+          fi
+        done
     - name: Check Issue
       id: get-image
       env:
