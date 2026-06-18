@@ -13,3 +13,4 @@ lark-oapi==1.4.10
 
 # 加密解密（用于 Lark 消息签名验证，使用 Python 内置 hashlib 即可）
 pycryptodome==3.19.0
+cryptography==46.0.7
