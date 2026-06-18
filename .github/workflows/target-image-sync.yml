@@ -60,7 +60,7 @@ jobs:
       if: success()
       run: |
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
-        curl -X POST "${{ secrets.WEBHOOK_URL }}/api/notify" \
+        curl -X POST "${{ secrets.WECOM_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
           -d "{
             \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
@@ -290,7 +290,7 @@ jobs:
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
         
-        curl -X POST "${{ secrets.WEBHOOK_URL }}/api/notify" \
+        curl -X POST "${{ secrets.WECOM_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
           -d "{
             \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
@@ -372,7 +372,7 @@ jobs:
           ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
         fi
         
-        curl -X POST "${{ secrets.WEBHOOK_URL }}/api/notify" \
+        curl -X POST "${{ secrets.WECOM_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
           -d "{
             \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",

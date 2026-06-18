@@ -554,11 +554,11 @@ PORT=8081                                     # 监听端口（默认 8081）
 
 | Secret 名称 | 说明 | 示例值 |
 |------------|------|--------|
-| `WEBHOOK_URL` | Webhook 服务器地址 | `https://your-webhook-server.com` |
+| `WECOM_WEBHOOK_URL` | 企业微信 Webhook 服务器地址 | `https://your-webhook-server.com` |
 | `WEBHOOK_SECRET` | Webhook 验证密钥 | 与 `.env` 中的 `WEBHOOK_SECRET` 相同 |
 
 **配置说明**：
-- `WEBHOOK_URL` 是你部署的企业微信 webhook 服务器的公网地址（不包含路径）
+- `WECOM_WEBHOOK_URL` 是你部署的企业微信 webhook 服务器的公网地址（不包含路径）
 - `WEBHOOK_SECRET` 用于验证 GitHub Actions 调用的合法性，必须与 webhook 服务器的 `.env` 中配置的值一致
 - 该配置用于实现多状态通知功能（同步中、同步成功、同步失败）
 
