@@ -1,0 +1,421 @@
+name: Target Sync Image
+on:
+  issues:
+    types:
+      - opened
+
+# https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: contains(github.event.issue.labels.*.name, 'sync image')
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # REGISTRY: ${{ secrets.REGISTRY }}
+      # NAME_SPACE: ${{ secrets.NAME_SPACE }}
+      # USER: ${{ secrets.USER }}
+      # PASSWORD: ${{ secrets.PASSWORD }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Check Issue
+      id: get-image
+      env:
+        IMAGE: "${{ github.event.issue.title }}"
+      run: |
+        ORIGIN_IMAGE=$(echo "${IMAGE}" | sed 's/ //g')
+        if [[ "${ORIGIN_IMAGE}" == *"//"* ]] || [[ "${ORIGIN_IMAGE}" == *" "* ]]; then
+          gh issue comment ${{ github.event.issue.number }} -b "镜像 '${ORIGIN_IMAGE}' 不是一个镜像"
+          exit 1
+        fi
+        if [[ "${ORIGIN_IMAGE%%/*}" != *"."* ]] || [[ "${ORIGIN_IMAGE}" != *"/"* ]]; then
+          if [[ "${ORIGIN_IMAGE}" != *":"* ]]; then
+            gh issue comment ${{ github.event.issue.number }} -b "由于你没有指定tag或者域名将使用默认的仓库\`docker.io\`和默认的tag\`latest\`,如: \`docker.io/${ORIGIN_IMAGE}:latest\`"
+            ORIGIN_IMAGE="docker.io/${ORIGIN_IMAGE}:latest"
+            gh issue edit ${{ github.event.issue.number }} --title "${ORIGIN_IMAGE}"
+          else
+            gh issue comment ${{ github.event.issue.number }} -b "由于你没有指定仓库名将使用默认的仓库\`docker.io\`,如: \`docker.io/${ORIGIN_IMAGE}\`"
+            ORIGIN_IMAGE="docker.io/${ORIGIN_IMAGE}"
+            gh issue edit ${{ github.event.issue.number }} --title "${ORIGIN_IMAGE}"
+          fi
+          # exit 1
+        fi
+        if [[ "${ORIGIN_IMAGE}" != *":"* ]]; then
+          gh issue comment ${{ github.event.issue.number }} -b "由于你没有指定仓库名将使用默认的tag\`latest\`, 如: \`${ORIGIN_IMAGE}:latest\`"
+          ORIGIN_IMAGE="${ORIGIN_IMAGE}:latest"
+          gh issue edit ${{ github.event.issue.number }} --title "${ORIGIN_IMAGE}"
+          # exit 1
+        fi
+        echo "image=${ORIGIN_IMAGE}" >> $GITHUB_OUTPUT
+    - name: Check Image
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        gh issue comment ${{ github.event.issue.number }} -b "镜像 ${ORIGIN_IMAGE} 同步中...<br>[详情请查看](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+        gh issue edit ${{ github.event.issue.number }} --add-label "syncing"
+    
+    - name: Send Syncing Notification (WeCom)
+      if: success()
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        curl -X POST "${{ secrets.WEBHOOK_URL }}/api/notify" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
+            \"issue_number\": ${{ github.event.issue.number }},
+            \"status\": \"syncing\",
+            \"image_name\": \"${ORIGIN_IMAGE}\"
+          }" || echo "发送企业微信通知失败（不影响同步）"
+
+    - name: Send Syncing Notification (Lark)
+      if: success()
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        curl -X POST "${{ secrets.LARK_WEBHOOK_URL }}/api/notify" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
+            \"issue_number\": ${{ github.event.issue.number }},
+            \"status\": \"syncing\",
+            \"image_name\": \"${ORIGIN_IMAGE}\"
+          }" || echo "发送 Lark 通知失败（不影响同步）"
+  
+    - name: Login to Huawei SWR
+      uses: docker/login-action@v1
+      with:
+        registry: swr.${{ secrets.HUAWEI_SWR_REGION }}.myhuaweicloud.com
+        username: ${{ secrets.HUAWEI_SWR_DOCKER_USERNAME }}
+        password: ${{ secrets.HUAWEI_SWR_DOCKER_PASSWORD }}
+    - name: Install Skopeo
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y skopeo
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+    
+    - name: Install Huawei Cloud SDK
+      run: |
+        pip install huaweicloudsdkcore huaweicloudsdkswr
+    - name: Sync Docker Image
+      id: sync-image
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        REMOVE_DOMAIN="${{ secrets.REMOVE_SOURCE_DOMAIN }}"
+        
+        # 根据配置决定是否去除源镜像的域名部分
+        # REMOVE_SOURCE_DOMAIN 设置为 true 时去除域名，否则保留完整镜像名
+        if [[ "${REMOVE_DOMAIN}" == "true" ]]; then
+          # 去除域名模式：docker.io/library/busybox:latest -> library/busybox:latest
+          if [[ ${ORIGIN_IMAGE} =~ ^[^/]*\.[^/]*/ ]]; then
+            IMAGE_WITHOUT_DOMAIN=$(echo ${ORIGIN_IMAGE} | sed 's|^[^/]*/||')
+            echo "✓ 已启用域名去除，检测到域名，去除后: ${IMAGE_WITHOUT_DOMAIN}"
+          else
+            IMAGE_WITHOUT_DOMAIN=${ORIGIN_IMAGE}
+            echo "✓ 已启用域名去除，但未检测到域名，保持原样: ${IMAGE_WITHOUT_DOMAIN}"
+          fi
+        else
+          # 保留完整镜像名模式：docker.io/library/busybox:latest -> docker.io/library/busybox:latest
+          IMAGE_WITHOUT_DOMAIN=${ORIGIN_IMAGE}
+          echo "✗ 未启用域名去除，使用完整镜像名: ${IMAGE_WITHOUT_DOMAIN}"
+        fi
+        
+        BASE_IMAGE=$(echo ${IMAGE_WITHOUT_DOMAIN} | sed 's/\(.*\):.*/\1/')
+        SWR_REGISTRY="swr.${{ secrets.HUAWEI_SWR_REGION }}.myhuaweicloud.com"
+        TARGET_IMAGE="${SWR_REGISTRY}/${{ secrets.HUAWEI_SWR_NAMESPACE }}/${IMAGE_WITHOUT_DOMAIN}"
+        
+        echo "开始同步镜像:"
+        echo "  源镜像: ${ORIGIN_IMAGE}"
+        echo "  目标镜像: ${TARGET_IMAGE}"
+        
+        # 输出目标镜像地址供后续步骤使用
+        echo "target_image=${TARGET_IMAGE}" >> $GITHUB_OUTPUT
+        
+        # 使用 skopeo 直接复制镜像（推荐方式，更快且不占用本地空间）
+        skopeo copy docker://${ORIGIN_IMAGE} docker://${TARGET_IMAGE}
+        
+        # 备选方案：使用 docker 命令同步（需要下载到本地再上传，较慢）
+        # docker pull ${ORIGIN_IMAGE}
+        # docker tag ${ORIGIN_IMAGE} ${TARGET_IMAGE}
+        # docker push ${TARGET_IMAGE}
+        
+        echo "验证镜像同步结果"
+        docker pull ${TARGET_IMAGE}
+    
+    - name: Set Repository to Public
+      id: set-public
+      env:
+        HUAWEI_CLOUD_ACCESS_KEY: ${{ secrets.HUAWEI_CLOUD_ACCESS_KEY }}
+        HUAWEI_CLOUD_SECRET_KEY: ${{ secrets.HUAWEI_CLOUD_SECRET_KEY }}
+        HUAWEI_SWR_REGION: ${{ secrets.HUAWEI_SWR_REGION }}
+        HUAWEI_SWR_NAMESPACE: ${{ secrets.HUAWEI_SWR_NAMESPACE }}
+      run: |
+        TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
+        
+        # 从目标镜像中提取仓库路径（去除域名和标签）
+        REPO_PATH=$(echo ${TARGET_IMAGE} | sed 's|^[^/]*/[^/]*/||' | sed 's/\(.*\):.*/\1/')
+        
+        echo "设置仓库为公开: ${REPO_PATH}"
+        
+        # 使用内联 Python 脚本设置仓库为公开
+        python - <<EOF
+        import os
+        import sys
+        from huaweicloudsdkcore.auth.credentials import BasicCredentials
+        from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+        from huaweicloudsdkcore.exceptions import exceptions
+        from huaweicloudsdkswr.v2 import SwrClient, UpdateRepoRequest, UpdateRepoRequestBody
+        
+        # 从环境变量获取配置
+        ak = os.environ.get('HUAWEI_CLOUD_ACCESS_KEY')
+        sk = os.environ.get('HUAWEI_CLOUD_SECRET_KEY')
+        region = os.environ.get('HUAWEI_SWR_REGION')
+        namespace = os.environ.get('HUAWEI_SWR_NAMESPACE')
+        repository = '${REPO_PATH}'
+        
+        # 验证环境变量
+        if not all([ak, sk, region, namespace, repository]):
+            print('错误: 缺少必需的环境变量')
+            sys.exit(1)
+        
+        # 创建客户端
+        credentials = BasicCredentials(ak, sk)
+        client = SwrClient.new_builder() \\
+            .with_credentials(credentials) \\
+            .with_region(SwrRegion.value_of(region)) \\
+            .build()
+        
+        # 华为云 SWR API 要求：仓库名称中的斜杠需要替换为 $
+        repository_encoded = repository.replace('/', '\$')
+        if repository != repository_encoded:
+            print(f'仓库名称转换: {repository} -> {repository_encoded}')
+        
+        try:
+            request = UpdateRepoRequest()
+            request.namespace = namespace
+            request.repository = repository_encoded
+            request.body = UpdateRepoRequestBody(is_public=True)
+            response = client.update_repo(request)
+            print(f'成功: 已将仓库 {namespace}/{repository} 设置为公开')
+            print(response)
+            sys.exit(0)
+        except exceptions.ClientRequestException as e:
+            print(f'错误: 设置仓库公开失败')
+            print(f'状态码: {e.status_code}')
+            print(f'错误信息: {e.error_msg}')
+            sys.exit(1)
+        EOF
+    
+    - name: Verify Repository is Public
+      id: verify-public
+      env:
+        HUAWEI_CLOUD_ACCESS_KEY: ${{ secrets.HUAWEI_CLOUD_ACCESS_KEY }}
+        HUAWEI_CLOUD_SECRET_KEY: ${{ secrets.HUAWEI_CLOUD_SECRET_KEY }}
+        HUAWEI_SWR_REGION: ${{ secrets.HUAWEI_SWR_REGION }}
+        HUAWEI_SWR_NAMESPACE: ${{ secrets.HUAWEI_SWR_NAMESPACE }}
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
+        
+        # 从目标镜像中提取仓库路径（去除域名和标签）
+        REPO_PATH=$(echo ${TARGET_IMAGE} | sed 's|^[^/]*/[^/]*/||' | sed 's/\(.*\):.*/\1/')
+        
+        echo "验证仓库是否为公开: ${REPO_PATH}"
+        
+        # 使用内联 Python 脚本验证仓库是否为公开
+        python - <<EOF
+        import os
+        import sys
+        from huaweicloudsdkcore.auth.credentials import BasicCredentials
+        from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+        from huaweicloudsdkcore.exceptions import exceptions
+        from huaweicloudsdkswr.v2 import SwrClient, ShowRepositoryRequest
+        
+        # 从环境变量获取配置
+        ak = os.environ.get('HUAWEI_CLOUD_ACCESS_KEY')
+        sk = os.environ.get('HUAWEI_CLOUD_SECRET_KEY')
+        region = os.environ.get('HUAWEI_SWR_REGION')
+        namespace = os.environ.get('HUAWEI_SWR_NAMESPACE')
+        repository = '${REPO_PATH}'
+        
+        # 验证环境变量
+        if not all([ak, sk, region, namespace, repository]):
+            print('错误: 缺少必需的环境变量')
+            sys.exit(1)
+        
+        # 创建客户端
+        credentials = BasicCredentials(ak, sk)
+        client = SwrClient.new_builder() \\
+            .with_credentials(credentials) \\
+            .with_region(SwrRegion.value_of(region)) \\
+            .build()
+        
+        # 华为云 SWR API 要求：仓库名称中的斜杠需要替换为 $
+        repository_encoded = repository.replace('/', '\$')
+        if repository != repository_encoded:
+            print(f'仓库名称转换: {repository} -> {repository_encoded}')
+        
+        try:
+            request = ShowRepositoryRequest()
+            request.namespace = namespace
+            request.repository = repository_encoded
+            response = client.show_repository(request)
+            
+            # 检查仓库是否为公开
+            is_public = response.is_public if hasattr(response, 'is_public') else False
+            
+            if is_public:
+                print(f'验证成功: 仓库 {namespace}/{repository} 已设置为公开')
+                print(f'仓库详情: {response}')
+                sys.exit(0)
+            else:
+                print(f'验证失败: 仓库 {namespace}/{repository} 不是公开的')
+                print(f'仓库详情: {response}')
+                sys.exit(1)
+        except exceptions.ClientRequestException as e:
+            print(f'错误: 获取仓库信息失败')
+            print(f'状态码: {e.status_code}')
+            print(f'错误信息: {e.error_msg}')
+            sys.exit(1)
+        EOF
+    
+    - name: Send Success Notification (WeCom)
+      id: send-success
+      if: success()
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
+        
+        curl -X POST "${{ secrets.WEBHOOK_URL }}/api/notify" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
+            \"issue_number\": ${{ github.event.issue.number }},
+            \"status\": \"success\",
+            \"image_name\": \"${ORIGIN_IMAGE}\",
+            \"target_image\": \"${TARGET_IMAGE}\"
+          }" || echo "发送企业微信通知失败（不影响同步）"
+
+    - name: Send Success Notification (Lark)
+      if: success()
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
+        
+        curl -X POST "${{ secrets.LARK_WEBHOOK_URL }}/api/notify" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
+            \"issue_number\": ${{ github.event.issue.number }},
+            \"status\": \"success\",
+            \"image_name\": \"${ORIGIN_IMAGE}\",
+            \"target_image\": \"${TARGET_IMAGE}\"
+          }" || echo "发送 Lark 通知失败（不影响同步）"
+    
+    - name: Close Success Issue
+      if: success()
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
+        
+        # 创建成功评论内容
+        cat > comment.md << 'EOF'
+        
+        镜像 `${ORIGIN_IMAGE}` 同步完成<br>
+        请使用 `${TARGET_IMAGE}` 替代源镜像
+        
+        <h1>快捷命令</h1>
+        
+        ```sh
+        # Docker 拉取命令
+        docker pull ${TARGET_IMAGE}
+        docker tag ${TARGET_IMAGE} ${ORIGIN_IMAGE}
+        
+        # Containerd 拉取命令
+        ctr images pull ${TARGET_IMAGE}
+        ctr images tag ${TARGET_IMAGE} ${ORIGIN_IMAGE}
+        
+        # Shell 快速替换命令
+        sed -i "s#${ORIGIN_IMAGE}#${TARGET_IMAGE}#g" 你的文件名
+        ```
+        EOF
+        
+        # 替换变量
+        sed -i "s|\${ORIGIN_IMAGE}|${ORIGIN_IMAGE}|g" comment.md
+        sed -i "s|\${TARGET_IMAGE}|${TARGET_IMAGE}|g" comment.md
+        
+        # 添加评论
+        gh issue comment ${{ github.event.issue.number }} -F comment.md
+        
+        # 修改标签并关闭
+        gh issue edit ${{ github.event.issue.number }} --remove-label "syncing"
+        gh issue edit ${{ github.event.issue.number }} --add-label "sync image succeeded" -b "IMAGE SYNC"
+        gh issue close ${{ github.event.issue.number }} --reason "completed"
+    - name: Send Failure Notification (WeCom)
+      if: failure() && steps.send-success.conclusion != 'success'
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        
+        # 根据失败步骤判断错误原因
+        if [[ "${{ steps.sync-image.outcome }}" == "failure" ]]; then
+          ERROR_MSG="镜像同步失败，可能原因：①源镜像不存在 ②源镜像仓库无法访问 ③网络超时"
+        elif [[ "${{ steps.set-public.outcome }}" == "failure" ]]; then
+          ERROR_MSG="设置仓库为公开失败，请检查华为云 AK/SK 权限配置"
+        elif [[ "${{ steps.verify-public.outcome }}" == "failure" ]]; then
+          ERROR_MSG="验证仓库公开状态失败，仓库可能未正确设置为公开"
+        else
+          ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
+        fi
+        
+        curl -X POST "${{ secrets.WEBHOOK_URL }}/api/notify" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
+            \"issue_number\": ${{ github.event.issue.number }},
+            \"status\": \"failure\",
+            \"image_name\": \"${ORIGIN_IMAGE}\",
+            \"error_message\": \"${ERROR_MSG}\",
+            \"logs_url\": \"${LOGS_URL}\"
+          }" || echo "发送企业微信通知失败"
+
+    - name: Send Failure Notification (Lark)
+      if: failure() && steps.send-success.conclusion != 'success'
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        
+        # 根据失败步骤判断错误原因（复用上面的逻辑）
+        if [[ "${{ steps.sync-image.outcome }}" == "failure" ]]; then
+          ERROR_MSG="镜像同步失败，可能原因：①源镜像不存在 ②源镜像仓库无法访问 ③网络超时"
+        elif [[ "${{ steps.set-public.outcome }}" == "failure" ]]; then
+          ERROR_MSG="设置仓库为公开失败，请检查华为云 AK/SK 权限配置"
+        elif [[ "${{ steps.verify-public.outcome }}" == "failure" ]]; then
+          ERROR_MSG="验证仓库公开状态失败，仓库可能未正确设置为公开"
+        else
+          ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
+        fi
+        
+        curl -X POST "${{ secrets.LARK_WEBHOOK_URL }}/api/notify" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
+            \"issue_number\": ${{ github.event.issue.number }},
+            \"status\": \"failure\",
+            \"image_name\": \"${ORIGIN_IMAGE}\",
+            \"error_message\": \"${ERROR_MSG}\",
+            \"logs_url\": \"${LOGS_URL}\"
+          }" || echo "发送 Lark 通知失败"
+    
+    - name: Close Failure Issue
+      if: failure() && steps.send-success.conclusion != 'success'
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        gh issue comment ${{ github.event.issue.number }} -b "镜像 ${ORIGIN_IMAGE} 同步失败[详情请查看](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})<br>请检查 image 是否存在, [查看成功例子](https://github.com/kubesre/docker-registry-mirrors/issues/13)<br>如果需要同步, 请重新提交正确的issue"
+        gh issue edit ${{ github.event.issue.number }} --remove-label "syncing"
+        gh issue edit ${{ github.event.issue.number }} --add-label "sync image failure" -b "IMAGE SYNC"
+        gh issue close ${{ github.event.issue.number }} --reason "not planned"

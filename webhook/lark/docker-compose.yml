@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  webhook-lark:
+    # 使用预构建镜像（推荐）
+    image: swr.cn-east-3.myhuaweicloud.com/beamnet/lark-webhook-server:latest
+
+    # 本地构建（如需自定义代码，取消下面的注释，并注释掉上面的 image）
+    # build: .
+
+    container_name: webhook-lark
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+
+    # 从 .env 文件加载所有环境变量
+    env_file:
+      - .env
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

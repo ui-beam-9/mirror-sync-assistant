@@ -1,0 +1,252 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'webhook/wecom/**'
+      - 'webhook/lark/**'
+      - '.github/workflows/build-docker-image.yml'
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - 'webhook/wecom/**'
+      - 'webhook/lark/**'
+  schedule:
+    # 每天 UTC 0:00 和 12:00 运行
+    # 北京时间（UTC+8）对应：UTC 16:00（北京时间 0:00）和 UTC 4:00（北京时间 12:00）
+    # 如需调整为北京时间，请使用：'0 16 * * *' 和 '0 4 * * *'
+  - cron: '0 16 * * *'   # UTC 16:00 = 北京时间 0:00（第二天）
+  - cron: '0 4 * * *'    # UTC 4:00 = 北京时间 12:00
+  workflow_dispatch:
+
+jobs:
+  # 第一步：检测哪些目录发生了变化
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      wecom: ${{ steps.filter.outputs.wecom }}
+      lark: ${{ steps.filter.outputs.lark }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            wecom:
+              - 'webhook/wecom/**'
+            lark:
+              - 'webhook/lark/**'
+            workflow:
+              - '.github/workflows/build-docker-image.yml'
+
+  # WeCom Webhook 镜像
+  build-wecom:
+    name: Build WeCom Webhook Server
+    needs: changes
+    if: |
+      needs.changes.outputs.wecom == 'true' ||
+      needs.changes.outputs.workflow == 'true' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Huawei SWR
+        uses: docker/login-action@v3
+        with:
+          registry: swr.${{ secrets.HUAWEI_SWR_REGION }}.myhuaweicloud.com
+          username: ${{ secrets.HUAWEI_SWR_DOCKER_USERNAME }}
+          password: ${{ secrets.HUAWEI_SWR_DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          IMAGE_FULL_NAME="swr.${{ secrets.HUAWEI_SWR_REGION }}.myhuaweicloud.com/${{ secrets.HUAWEI_SWR_NAMESPACE }}/wecom-webhook-server"
+          echo "image=${IMAGE_FULL_NAME}" >> $GITHUB_OUTPUT
+          echo "Building image: ${IMAGE_FULL_NAME}:latest"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./webhook/wecom
+          file: ./webhook/wecom/Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      - name: Set repository to public
+        run: |
+          pip install huaweicloudsdkcore huaweicloudsdkswr
+          python - <<EOF
+          import os
+          from huaweicloudsdkcore.auth.credentials import BasicCredentials
+          from huaweicloudsdkcore.http.http_config import HttpConfig
+          from huaweicloudsdkcore.exceptions import exceptions
+          from huaweicloudsdkswr.v2 import SwrClient, UpdateRepoRequest, UpdateRepoRequestBody
+          from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+          
+          ak = os.environ.get('HUAWEI_CLOUD_ACCESS_KEY')
+          sk = os.environ.get('HUAWEI_CLOUD_SECRET_KEY')
+          region = os.environ.get('HUAWEI_SWR_REGION')
+          namespace = os.environ.get('HUAWEI_SWR_NAMESPACE')
+          repository = 'wecom-webhook-server'
+          
+          credentials = BasicCredentials(ak, sk)
+          client = SwrClient.new_builder() \
+              .with_credentials(credentials) \
+              .with_region(SwrRegion.value_of(region)) \
+              .build()
+          
+          try:
+              request = UpdateRepoRequest()
+              request.namespace = namespace
+              request.repository = repository
+              request.body = UpdateRepoRequestBody(is_public=True)
+              response = client.update_repo(request)
+              print(f"✅ 成功设置镜像仓库为公开: {namespace}/{repository}")
+          except exceptions.ClientRequestException as e:
+              print(f"❌ 设置失败: {e.error_msg}")
+              exit(1)
+          EOF
+        env:
+          HUAWEI_CLOUD_ACCESS_KEY: ${{ secrets.HUAWEI_CLOUD_ACCESS_KEY }}
+          HUAWEI_CLOUD_SECRET_KEY: ${{ secrets.HUAWEI_CLOUD_SECRET_KEY }}
+          HUAWEI_SWR_REGION: ${{ secrets.HUAWEI_SWR_REGION }}
+          HUAWEI_SWR_NAMESPACE: ${{ secrets.HUAWEI_SWR_NAMESPACE }}
+
+      - name: Image build summary
+        run: |
+          echo "## 🎉 WeCom Webhook 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 镜像信息" >> $GITHUB_STEP_SUMMARY
+          echo "- **镜像名称**: \`${{ steps.meta.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **标签**: \`latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **提交 SHA**: \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 使用方式" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ steps.meta.outputs.image }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # Lark Webhook 镜像
+  build-lark:
+    name: Build Lark Webhook Server
+    needs: changes
+    if: |
+      needs.changes.outputs.lark == 'true' ||
+      needs.changes.outputs.workflow == 'true' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Huawei SWR
+        uses: docker/login-action@v3
+        with:
+          registry: swr.${{ secrets.HUAWEI_SWR_REGION }}.myhuaweicloud.com
+          username: ${{ secrets.HUAWEI_SWR_DOCKER_USERNAME }}
+          password: ${{ secrets.HUAWEI_SWR_DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          IMAGE_FULL_NAME="swr.${{ secrets.HUAWEI_SWR_REGION }}.myhuaweicloud.com/${{ secrets.HUAWEI_SWR_NAMESPACE }}/lark-webhook-server"
+          echo "image=${IMAGE_FULL_NAME}" >> $GITHUB_OUTPUT
+          echo "Building image: ${IMAGE_FULL_NAME}:latest"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./webhook/lark
+          file: ./webhook/lark/Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      - name: Set repository to public
+        run: |
+          pip install huaweicloudsdkcore huaweicloudsdkswr
+          python - <<EOF
+          import os
+          from huaweicloudsdkcore.auth.credentials import BasicCredentials
+          from huaweicloudsdkcore.http.http_config import HttpConfig
+          from huaweicloudsdkcore.exceptions import exceptions
+          from huaweicloudsdkswr.v2 import SwrClient, UpdateRepoRequest, UpdateRepoRequestBody
+          from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+          
+          ak = os.environ.get('HUAWEI_CLOUD_ACCESS_KEY')
+          sk = os.environ.get('HUAWEI_CLOUD_SECRET_KEY')
+          region = os.environ.get('HUAWEI_SWR_REGION')
+          namespace = os.environ.get('HUAWEI_SWR_NAMESPACE')
+          repository = 'lark-webhook-server'
+          
+          credentials = BasicCredentials(ak, sk)
+          client = SwrClient.new_builder() \
+              .with_credentials(credentials) \
+              .with_region(SwrRegion.value_of(region)) \
+              .build()
+          
+          try:
+              request = UpdateRepoRequest()
+              request.namespace = namespace
+              request.repository = repository
+              request.body = UpdateRepoRequestBody(is_public=True)
+              response = client.update_repo(request)
+              print(f"✅ 成功设置镜像仓库为公开: {namespace}/{repository}")
+          except exceptions.ClientRequestException as e:
+              print(f"❌ 设置失败: {e.error_msg}")
+              exit(1)
+          EOF
+        env:
+          HUAWEI_CLOUD_ACCESS_KEY: ${{ secrets.HUAWEI_CLOUD_ACCESS_KEY }}
+          HUAWEI_CLOUD_SECRET_KEY: ${{ secrets.HUAWEI_CLOUD_SECRET_KEY }}
+          HUAWEI_SWR_REGION: ${{ secrets.HUAWEI_SWR_REGION }}
+          HUAWEI_SWR_NAMESPACE: ${{ secrets.HUAWEI_SWR_NAMESPACE }}
+
+      - name: Image build summary
+        run: |
+          echo "## 🎉 Lark Webhook 镜像构建成功！" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 镜像信息" >> $GITHUB_STEP_SUMMARY
+          echo "- **镜像名称**: \`${{ steps.meta.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **标签**: \`latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **提交 SHA**: \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 使用方式" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ steps.meta.outputs.image }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

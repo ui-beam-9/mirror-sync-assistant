@@ -1,0 +1,16 @@
+# Web 服务器
+Flask==3.0.0
+gunicorn==21.2.0
+
+# HTTP 请求
+requests==2.31.0
+
+# 加密解密
+pycryptodome==3.19.0
+
+# XML 解析
+xmltodict==0.13.0
+
+# 华为云 SDK（用于镜像仓库管理）
+huaweicloudsdkcore==3.1.60
+huaweicloudsdkswr==3.1.60

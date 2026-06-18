@@ -1,0 +1,15 @@
+# 环境变量加载
+python-dotenv==1.2.2
+
+# Web 服务器
+Flask==3.0.0
+gunicorn==21.2.0
+
+# HTTP 请求
+requests==2.31.0
+
+# Lark Open API SDK（支持国际版 Lark 和中国版飞书）
+lark-oapi==1.4.10
+
+# 加密解密（用于 Lark 消息签名验证，使用 Python 内置 hashlib 即可）
+pycryptodome==3.19.0
