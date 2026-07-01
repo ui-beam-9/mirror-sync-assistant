@@ -24,12 +24,23 @@ jobs:
     - name: Ensure Labels Exist
       run: |
         # 确保必需的标签存在，如果不存在则创建
-        for label in "sync image" "syncing" "sync image succeeded" "sync image failure"; do
+        # 格式: "标签名|颜色"
+        LABELS=(
+          "sync image|0366d6"
+          "syncing|fbca04"
+          "sync image succeeded|0e8a16"
+          "sync image failure|d73a4a"
+          "notify-wechat|1a7f37"
+          "notify-email|0969da"
+        )
+        for entry in "${LABELS[@]}"; do
+          label="${entry%|*}"
+          color="${entry#*|}"
           if gh label list --json name -q ".[] | select(.name==\"$label\") | .name" | grep -q "$label"; then
             echo "✓ 标签 '$label' 已存在"
           else
-            echo "→ 创建标签 '$label'"
-            gh label create "$label" --color "0366d6" --force
+            echo "→ 创建标签 '$label' (颜色: #$color)"
+            gh label create "$label" --color "$color" --force
           fi
         done
     - name: Check Issue
@@ -92,6 +103,15 @@ jobs:
             \"status\": \"syncing\",
             \"image_name\": \"${ORIGIN_IMAGE}\"
           }" || echo "发送 Lark 通知失败（不影响同步）"
+
+    - name: Send Web Notification (Syncing)
+      if: success()
+      env:
+        BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        bash .github/scripts/web-notify.sh syncing "${{ github.event.issue.number }}" "${ORIGIN_IMAGE}" "" "" "" \
+          || echo "网页端同步中通知发送失败（不影响同步）"
   
     - name: Login to Huawei SWR
       uses: docker/login-action@v1
@@ -326,6 +346,16 @@ jobs:
             \"image_name\": \"${ORIGIN_IMAGE}\",
             \"target_image\": \"${TARGET_IMAGE}\"
           }" || echo "发送 Lark 通知失败（不影响同步）"
+
+    - name: Send Web Notification (Success)
+      if: success()
+      env:
+        BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        TARGET_IMAGE="${{ steps.sync-image.outputs.target_image }}"
+        bash .github/scripts/web-notify.sh success "${{ github.event.issue.number }}" "${ORIGIN_IMAGE}" "${TARGET_IMAGE}" "" "" \
+          || echo "网页端成功通知发送失败（不影响同步）"
     
     - name: Close Success Issue
       if: success()
@@ -421,6 +451,26 @@ jobs:
             \"error_message\": \"${ERROR_MSG}\",
             \"logs_url\": \"${LOGS_URL}\"
           }" || echo "发送 Lark 通知失败"
+
+    - name: Send Web Notification (Failure)
+      if: failure() && steps.send-success.conclusion != 'success'
+      env:
+        BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        # 复用失败原因判断
+        if [[ "${{ steps.sync-image.outcome }}" == "failure" ]]; then
+          ERROR_MSG="镜像同步失败，可能原因：①源镜像不存在 ②源镜像仓库无法访问 ③网络超时"
+        elif [[ "${{ steps.set-public.outcome }}" == "failure" ]]; then
+          ERROR_MSG="设置仓库为公开失败，请检查华为云 AK/SK 权限配置"
+        elif [[ "${{ steps.verify-public.outcome }}" == "failure" ]]; then
+          ERROR_MSG="验证仓库公开状态失败，仓库可能未正确设置为公开"
+        else
+          ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
+        fi
+        bash .github/scripts/web-notify.sh failure "${{ github.event.issue.number }}" "${ORIGIN_IMAGE}" "" "${ERROR_MSG}" "${LOGS_URL}" \
+          || echo "网页端失败通知发送失败"
     
     - name: Close Failure Issue
       if: failure() && steps.send-success.conclusion != 'success'

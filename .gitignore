@@ -82,9 +82,14 @@ build/
 #网页文件
 web/
 
-# 测试脚本
-scripts/
+# 测试脚本（仅根目录，不影响 .github/scripts/）
+/scripts/
 
 # 项目skills
 references/
 SKILL.md
+
+# 开发文档（不提交）
+tasks.md
+agents_chat/
+.workbuddy/
