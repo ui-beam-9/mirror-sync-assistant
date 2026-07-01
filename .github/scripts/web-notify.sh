@@ -91,34 +91,70 @@ echo "  邮箱: $NOTIFY_EMAIL"
 # 5. 根据 status 拼接 title / content
 ISSUE_URL="https://github.com/${GITHUB_REPOSITORY:-}/issues/$ISSUE_NUMBER"
 
+# 邮件通用样式（内联 CSS，兼容各邮件客户端）
+STYLE="max-width:600px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;color:#333;line-height:1.6;"
+HEADER_BG_SUCCESS="background:#52c41a;border-radius:8px 8px 0 0;padding:20px 24px;"
+HEADER_BG_FAIL="background:#ff4d4f;border-radius:8px 8px 0 0;padding:20px 24px;"
+HEADER_BG_SYNC="background:#1890ff;border-radius:8px 8px 0 0;padding:20px 24px;"
+HEADER_TITLE="color:#fff;font-size:20px;font-weight:600;margin:0;"
+BODY="padding:24px;background:#f9fafb;border-radius:0 0 8px 8px;"
+INFO_ROW="padding:8px 0;border-bottom:1px solid #e8e8e8;"
+INFO_LABEL="display:inline-block;width:80px;color:#999;font-size:13px;"
+INFO_VALUE="color:#333;font-weight:500;word-break:break-all;"
+CMD_BOX="background:#1e1e1e;color:#d4d4d4;border-radius:6px;padding:16px;margin:12px 0;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:13px;line-height:1.8;white-space:pre-wrap;word-break:break-all;"
+LINK_BTN="display:inline-block;background:#1890ff;color:#fff;text-decoration:none;padding:8px 20px;border-radius:4px;font-size:14px;margin-top:12px;"
+
 case "$STATUS" in
   syncing)
     TITLE="镜像同步中: ${ORIGIN_IMAGE}"
-    CONTENT="<h3>镜像同步中</h3>"
-    CONTENT="$CONTENT<p><b>镜像:</b> ${ORIGIN_IMAGE}</p>"
-    CONTENT="$CONTENT<p><b>Issue:</b> #${ISSUE_NUMBER}</p>"
-    CONTENT="$CONTENT<p>正在同步，请稍候...</p>"
-    CONTENT="$CONTENT<p><a href=\"$ISSUE_URL\">查看 Issue</a></p>"
+    CONTENT="<div style=\"$STYLE\">"
+    CONTENT="$CONTENT<div style=\"$HEADER_BG_SYNC\"><h2 style=\"$HEADER_TITLE\">镜像同步中</h2></div>"
+    CONTENT="$CONTENT<div style=\"$BODY\">"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">镜像</span><span style=\"$INFO_VALUE\">${ORIGIN_IMAGE}</span></div>"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">Issue</span><span style=\"$INFO_VALUE\">#${ISSUE_NUMBER}</span></div>"
+    CONTENT="$CONTENT<p style=\"color:#666;margin:16px 0;\">正在同步镜像，请耐心等待...</p>"
+    CONTENT="$CONTENT<a href=\"$ISSUE_URL\" style=\"$LINK_BTN\">查看 Issue</a>"
+    CONTENT="$CONTENT</div></div>"
     ;;
   success)
     TITLE="镜像同步成功: ${ORIGIN_IMAGE}"
-    CONTENT="<h3>镜像同步成功</h3>"
-    CONTENT="$CONTENT<p><b>源镜像:</b> ${ORIGIN_IMAGE}</p>"
-    CONTENT="$CONTENT<p><b>目标镜像:</b> ${TARGET_IMAGE}</p>"
-    CONTENT="$CONTENT<p><b>Issue:</b> #${ISSUE_NUMBER}</p>"
-    CONTENT="$CONTENT<h4>快捷命令</h4>"
-    CONTENT="$CONTENT<pre>docker pull ${TARGET_IMAGE}\ndocker tag ${TARGET_IMAGE} ${ORIGIN_IMAGE}</pre>"
-    CONTENT="$CONTENT<p><a href=\"$ISSUE_URL\">查看 Issue</a></p>"
+    # 目标镜像长度超过 60 字符时用小字号 + 省略号 + title 悬浮
+    TARGET_LEN=${#TARGET_IMAGE}
+    if [ "$TARGET_LEN" -gt 60 ]; then
+      TARGET_STYLE="color:#333;font-weight:500;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:440px;display:inline-block;vertical-align:middle;cursor:text;user-select:all;"
+      TARGET_HTML="<span title=\"${TARGET_IMAGE}\" style=\"${TARGET_STYLE}\">${TARGET_IMAGE}</span>"
+    else
+      TARGET_STYLE="color:#333;font-weight:500;font-size:15px;"
+      TARGET_HTML="<span style=\"${TARGET_STYLE}\">${TARGET_IMAGE}</span>"
+    fi
+    CONTENT="<div style=\"$STYLE\">"
+    CONTENT="$CONTENT<div style=\"$HEADER_BG_SUCCESS\"><h2 style=\"$HEADER_TITLE\">镜像同步成功</h2></div>"
+    CONTENT="$CONTENT<div style=\"$BODY\">"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">源镜像</span><span style=\"$INFO_VALUE\">${ORIGIN_IMAGE}</span></div>"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">目标镜像</span>${TARGET_HTML}</div>"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">Issue</span><span style=\"$INFO_VALUE\">#${ISSUE_NUMBER}</span></div>"
+    CONTENT="$CONTENT<h4 style=\"color:#333;margin:20px 0 8px;\">快捷命令</h4>"
+    CONTENT="$CONTENT<div style=\"$CMD_BOX\">docker pull ${TARGET_IMAGE}<br>docker tag ${TARGET_IMAGE} ${ORIGIN_IMAGE}</div>"
+    CONTENT="$CONTENT<a href=\"$ISSUE_URL\" style=\"$LINK_BTN\">查看 Issue</a>"
+    CONTENT="$CONTENT</div></div>"
     ;;
   failure)
     TITLE="镜像同步失败: ${ORIGIN_IMAGE}"
-    CONTENT="<h3>镜像同步失败</h3>"
-    CONTENT="$CONTENT<p><b>镜像:</b> ${ORIGIN_IMAGE}</p>"
-    CONTENT="$CONTENT<p><b>Issue:</b> #${ISSUE_NUMBER}</p>"
-    CONTENT="$CONTENT<p><b>失败原因:</b> ${ERROR_MESSAGE:-未知错误}</p>"
+    # 将 ①②③ 等序号转为换行，去除冗余前缀
+    FAIL_REASON=$(echo "${ERROR_MESSAGE:-未知错误}" | sed 's/①/\n- /g; s/②/\n- /g; s/③/\n- /g; s/④/\n- /g; s/⑤/\n- /g' | sed 's/可能原因：//g; s/镜像同步失败，//g' | sed '/^$/d; s/^[[:space:]]*//')
+    # 转换换行为 <br>
+    FAIL_REASON_HTML=$(echo "$FAIL_REASON" | sed ':a;N;$!ba;s/\n/<br>/g')
+    CONTENT="<div style=\"$STYLE\">"
+    CONTENT="$CONTENT<div style=\"$HEADER_BG_FAIL\"><h2 style=\"$HEADER_TITLE\">镜像同步失败</h2></div>"
+    CONTENT="$CONTENT<div style=\"$BODY\">"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">镜像</span><span style=\"$INFO_VALUE\">${ORIGIN_IMAGE}</span></div>"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">Issue</span><span style=\"$INFO_VALUE\">#${ISSUE_NUMBER}</span></div>"
+    CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">失败原因</span><span style=\"$INFO_VALUE\">${FAIL_REASON_HTML}</span></div>"
     if [ -n "$LOGS_URL" ]; then
-      CONTENT="$CONTENT<p><a href=\"$LOGS_URL\">查看详细日志</a></p>"
+      CONTENT="$CONTENT<a href=\"$LOGS_URL\" style=\"$LINK_BTN\">查看详细日志</a>"
     fi
+    CONTENT="$CONTENT<a href=\"$ISSUE_URL\" style=\"$LINK_BTN\">查看 Issue</a>"
+    CONTENT="$CONTENT</div></div>"
     ;;
   *)
     echo "⚠ 未知 status: $STATUS"
