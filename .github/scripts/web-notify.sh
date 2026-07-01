@@ -2,10 +2,10 @@
 # 网页端同步通知脚本
 #
 # 用途：在 GitHub Actions 中调用后端 /api/notify 接口，
-#       给通过网页端 SyncPage 提交同步任务的用户发送 PushPlus 微信通知或邮件通知。
+#       给通过网页端 SyncPage 提交同步任务的用户发送邮件通知。
 #
 # 触发条件：Issue body 中含有 <!-- web_sync_request --> 标记（由 web/backend/src/api/sync.js 写入）。
-# 通知方式：Issue body 中的 <!-- notify_method: wechat|email --> 注释决定。
+# 通知方式：Issue body 中的 <!-- notify_method: email --> 注释决定。
 # 邮箱地址：Issue body 中的 <!-- notify_email: xxx@xxx.com --> 注释提供。
 #
 # 用法：
@@ -47,7 +47,7 @@ if [ -z "$ISSUE_NUMBER" ]; then
   exit 0
 fi
 
-# 2. 读取 Issue body（含 labels）
+# 2. 读取 Issue body
 if ! command -v gh >/dev/null 2>&1; then
   echo "⚠ 未找到 gh CLI，跳过"
   exit 0
@@ -66,7 +66,7 @@ if ! echo "$ISSUE_BODY" | grep -q "<!-- web_sync_request -->"; then
 fi
 
 # 4. 解析通知方式与邮箱
-#    注释格式: <!-- notify_method: wechat -->  /  <!-- notify_email: xxx@x.com -->
+#    注释格式: <!-- notify_method: email -->  /  <!-- notify_email: xxx@x.com -->
 NOTIFY_METHOD=$(echo "$ISSUE_BODY" | sed -n 's/.*<!-- notify_method: \([^ ]*\) -->.*/\1/p' | head -n1)
 NOTIFY_EMAIL=$(echo "$ISSUE_BODY" | sed -n 's/.*<!-- notify_email: \([^ ]*\) -->.*/\1/p' | head -n1)
 
@@ -75,18 +75,18 @@ if [ -z "$NOTIFY_METHOD" ] || [ "$NOTIFY_METHOD" = "none" ]; then
   exit 0
 fi
 
-if [ "$NOTIFY_METHOD" != "wechat" ] && [ "$NOTIFY_METHOD" != "email" ]; then
-  echo "⚠ 未知通知方式: $NOTIFY_METHOD，跳过"
+if [ "$NOTIFY_METHOD" != "email" ]; then
+  echo "→ 通知方式非邮箱（$NOTIFY_METHOD），跳过"
   exit 0
 fi
 
-if [ "$NOTIFY_METHOD" = "email" ] && [ -z "$NOTIFY_EMAIL" ]; then
+if [ -z "$NOTIFY_EMAIL" ]; then
   echo "⚠ 邮箱通知但未提供邮箱地址，跳过"
   exit 0
 fi
 
-echo "  通知方式: $NOTIFY_METHOD"
-[ -n "$NOTIFY_EMAIL" ] && echo "  邮箱: $NOTIFY_EMAIL"
+echo "  通知方式: 邮箱"
+echo "  邮箱: $NOTIFY_EMAIL"
 
 # 5. 根据 status 拼接 title / content
 ISSUE_URL="https://github.com/${GITHUB_REPOSITORY:-}/issues/$ISSUE_NUMBER"
@@ -127,21 +127,13 @@ case "$STATUS" in
 esac
 
 # 6. 构造请求体并调用后端 /api/notify
-#    后端接口 body: { method, title, content, email? }
-if [ "$NOTIFY_METHOD" = "email" ]; then
-  PAYLOAD=$(jq -n \
-    --arg m "$NOTIFY_METHOD" \
-    --arg t "$TITLE" \
-    --arg c "$CONTENT" \
-    --arg e "$NOTIFY_EMAIL" \
-    '{method:$m, title:$t, content:$c, email:$e}')
-else
-  PAYLOAD=$(jq -n \
-    --arg m "$NOTIFY_METHOD" \
-    --arg t "$TITLE" \
-    --arg c "$CONTENT" \
-    '{method:$m, title:$t, content:$c}')
-fi
+#    后端接口 body: { method, title, content, email }
+PAYLOAD=$(jq -n \
+  --arg m "$NOTIFY_METHOD" \
+  --arg t "$TITLE" \
+  --arg c "$CONTENT" \
+  --arg e "$NOTIFY_EMAIL" \
+  '{method:$m, title:$t, content:$c, email:$e}')
 
 NOTIFY_URL="${BACKEND_API_URL%/}/notify"
 echo "  调用: POST $NOTIFY_URL"
