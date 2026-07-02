@@ -140,10 +140,8 @@ case "$STATUS" in
     ;;
   failure)
     TITLE="镜像同步失败: ${ORIGIN_IMAGE}"
-    # 将 ①②③ 等序号转为换行，去除冗余前缀
-    FAIL_REASON=$(echo "${ERROR_MESSAGE:-未知错误}" | sed 's/①/\n- /g; s/②/\n- /g; s/③/\n- /g; s/④/\n- /g; s/⑤/\n- /g' | sed 's/可能原因：//g; s/镜像同步失败，//g' | sed '/^$/d; s/^[[:space:]]*//')
-    # 转换换行为 <br>
-    FAIL_REASON_HTML=$(echo "$FAIL_REASON" | sed ':a;N;$!ba;s/\n/<br>/g')
+    # 直接使用真实错误信息，转义 HTML 特殊字符
+    FAIL_REASON_HTML=$(echo "${ERROR_MESSAGE:-未知错误}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
     CONTENT="<div style=\"$STYLE\">"
     CONTENT="$CONTENT<div style=\"$HEADER_BG_FAIL\"><h2 style=\"$HEADER_TITLE\">镜像同步失败</h2></div>"
     CONTENT="$CONTENT<div style=\"$BODY\">"

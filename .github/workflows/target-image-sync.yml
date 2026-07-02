@@ -166,7 +166,18 @@ jobs:
         echo "target_image=${TARGET_IMAGE}" >> $GITHUB_OUTPUT
         
         # 使用 skopeo 直接复制镜像（推荐方式，更快且不占用本地空间）
-        skopeo copy docker://${ORIGIN_IMAGE} docker://${TARGET_IMAGE}
+        # 捕获错误输出到文件，供失败通知使用
+        skopeo copy docker://${ORIGIN_IMAGE} docker://${TARGET_IMAGE} 2>&1 | tee /tmp/sync-error.log
+        SYNC_RC=${PIPESTATUS[0]}
+        if [ "$SYNC_RC" -ne 0 ]; then
+          # 提取关键错误行（含 fatal/error/denied/not found/unauthorized 等）
+          ERROR_DETAIL=$(grep -iE 'fatal|error|denied|not found|unauthorized|timeout|refused|connection' /tmp/sync-error.log | tail -1)
+          if [ -z "$ERROR_DETAIL" ]; then
+            ERROR_DETAIL=$(tail -1 /tmp/sync-error.log)
+          fi
+          echo "error_detail=${ERROR_DETAIL}" >> $GITHUB_OUTPUT
+          exit "$SYNC_RC"
+        fi
         
         # 备选方案：使用 docker 命令同步（需要下载到本地再上传，较慢）
         # docker pull ${ORIGIN_IMAGE}
@@ -174,7 +185,16 @@ jobs:
         # docker push ${TARGET_IMAGE}
         
         echo "验证镜像同步结果"
-        docker pull ${TARGET_IMAGE}
+        docker pull ${TARGET_IMAGE} 2>&1 | tee -a /tmp/sync-error.log
+        PULL_RC=${PIPESTATUS[0]}
+        if [ "$PULL_RC" -ne 0 ]; then
+          ERROR_DETAIL=$(grep -iE 'fatal|error|denied|not found|unauthorized|timeout|refused|connection' /tmp/sync-error.log | tail -1)
+          if [ -z "$ERROR_DETAIL" ]; then
+            ERROR_DETAIL="镜像拉取验证失败"
+          fi
+          echo "error_detail=${ERROR_DETAIL}" >> $GITHUB_OUTPUT
+          exit "$PULL_RC"
+        fi
     
     - name: Set Repository to Public
       id: set-public
@@ -401,16 +421,18 @@ jobs:
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         
-        # 根据失败步骤判断错误原因
-        if [[ "${{ steps.sync-image.outcome }}" == "failure" ]]; then
-          ERROR_MSG="镜像同步失败，可能原因：①源镜像不存在 ②源镜像仓库无法访问 ③网络超时"
-        elif [[ "${{ steps.set-public.outcome }}" == "failure" ]]; then
-          ERROR_MSG="设置仓库为公开失败，请检查华为云 AK/SK 权限配置"
-        elif [[ "${{ steps.verify-public.outcome }}" == "failure" ]]; then
-          ERROR_MSG="验证仓库公开状态失败，仓库可能未正确设置为公开"
-        else
-          ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
+        # 从步骤 output 读取真实错误信息
+        ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.set-public.outputs.error_detail }}"
         fi
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.verify-public.outputs.error_detail }}"
+        fi
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="同步过程中发生未知错误，请查看详细日志"
+        fi
+        ERROR_MSG="镜像同步失败：${ERROR_DETAIL}"
         
         curl -X POST "${{ secrets.WECOM_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
@@ -429,16 +451,18 @@ jobs:
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         
-        # 根据失败步骤判断错误原因（复用上面的逻辑）
-        if [[ "${{ steps.sync-image.outcome }}" == "failure" ]]; then
-          ERROR_MSG="镜像同步失败，可能原因：①源镜像不存在 ②源镜像仓库无法访问 ③网络超时"
-        elif [[ "${{ steps.set-public.outcome }}" == "failure" ]]; then
-          ERROR_MSG="设置仓库为公开失败，请检查华为云 AK/SK 权限配置"
-        elif [[ "${{ steps.verify-public.outcome }}" == "failure" ]]; then
-          ERROR_MSG="验证仓库公开状态失败，仓库可能未正确设置为公开"
-        else
-          ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
+        # 从步骤 output 读取真实错误信息
+        ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.set-public.outputs.error_detail }}"
         fi
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.verify-public.outputs.error_detail }}"
+        fi
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="同步过程中发生未知错误，请查看详细日志"
+        fi
+        ERROR_MSG="镜像同步失败：${ERROR_DETAIL}"
         
         curl -X POST "${{ secrets.LARK_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
@@ -458,16 +482,18 @@ jobs:
       run: |
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        # 复用失败原因判断
-        if [[ "${{ steps.sync-image.outcome }}" == "failure" ]]; then
-          ERROR_MSG="镜像同步失败，可能原因：①源镜像不存在 ②源镜像仓库无法访问 ③网络超时"
-        elif [[ "${{ steps.set-public.outcome }}" == "failure" ]]; then
-          ERROR_MSG="设置仓库为公开失败，请检查华为云 AK/SK 权限配置"
-        elif [[ "${{ steps.verify-public.outcome }}" == "failure" ]]; then
-          ERROR_MSG="验证仓库公开状态失败，仓库可能未正确设置为公开"
-        else
-          ERROR_MSG="同步过程中发生未知错误，请查看详细日志"
+        # 从步骤 output 读取真实错误信息
+        ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.set-public.outputs.error_detail }}"
         fi
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.verify-public.outputs.error_detail }}"
+        fi
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="同步过程中发生未知错误，请查看详细日志"
+        fi
+        ERROR_MSG="镜像同步失败：${ERROR_DETAIL}"
         bash .github/scripts/web-notify.sh failure "${{ github.event.issue.number }}" "${ORIGIN_IMAGE}" "" "${ERROR_MSG}" "${LOGS_URL}" \
           || echo "网页端失败通知发送失败"
     
