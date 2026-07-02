@@ -131,6 +131,31 @@ jobs:
     - name: Install Huawei Cloud SDK
       run: |
         pip install huaweicloudsdkcore huaweicloudsdkswr
+    - name: Check Image Exists
+      id: check-image
+      run: |
+        ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
+        echo "检查源镜像是否存在: ${ORIGIN_IMAGE}"
+        
+        # 使用 skopeo inspect 验证源镜像是否可访问
+        # set +e: 防止 inspect 失败时 set -e 直接退出，导致 error_detail 无法写入
+        set +e
+        skopeo inspect docker://${ORIGIN_IMAGE} > /tmp/inspect.log 2>&1
+        INSPECT_RC=$?
+        set -e
+        
+        if [ "$INSPECT_RC" -ne 0 ]; then
+          # 提取关键错误信息
+          ERROR_DETAIL=$(grep -iE 'manifest|not found|denied|unauthorized|timeout|refused|connection|error|no such' /tmp/inspect.log | tail -1)
+          if [ -z "$ERROR_DETAIL" ]; then
+            ERROR_DETAIL=$(tail -1 /tmp/inspect.log)
+          fi
+          echo "error_detail=源镜像不存在或无法访问 - ${ERROR_DETAIL}" >> $GITHUB_OUTPUT
+          echo "✗ 源镜像检查失败:"
+          cat /tmp/inspect.log
+          exit 1
+        fi
+        echo "✓ 源镜像存在，可以开始同步"
     - name: Sync Docker Image
       id: sync-image
       run: |
@@ -209,9 +234,12 @@ jobs:
         # 从目标镜像中提取仓库路径（去除域名和标签）
         REPO_PATH=$(echo ${TARGET_IMAGE} | sed 's|^[^/]*/[^/]*/||' | sed 's/\(.*\):.*/\1/')
         
+        export REPO_PATH
         echo "设置仓库为公开: ${REPO_PATH}"
         
         # 使用内联 Python 脚本设置仓库为公开
+        # set +e: 防止 python 失败时 set -e 直接退出，导致 error_detail 无法写入
+        set +e
         python - > /tmp/set-public.log 2>&1 <<'PYEOF'
         import os
         import sys
@@ -225,7 +253,7 @@ jobs:
         sk = os.environ.get('HUAWEI_CLOUD_SECRET_KEY')
         region = os.environ.get('HUAWEI_SWR_REGION')
         namespace = os.environ.get('HUAWEI_SWR_NAMESPACE')
-        repository = '${REPO_PATH}'
+        repository = os.environ.get('REPO_PATH')
         
         # 验证环境变量
         if not all([ak, sk, region, namespace, repository]):
@@ -234,13 +262,13 @@ jobs:
         
         # 创建客户端
         credentials = BasicCredentials(ak, sk)
-        client = SwrClient.new_builder() \\
-            .with_credentials(credentials) \\
-            .with_region(SwrRegion.value_of(region)) \\
+        client = SwrClient.new_builder() \
+            .with_credentials(credentials) \
+            .with_region(SwrRegion.value_of(region)) \
             .build()
         
         # 华为云 SWR API 要求：仓库名称中的斜杠需要替换为 $
-        repository_encoded = repository.replace('/', '\$')
+        repository_encoded = repository.replace('/', '$')
         if repository != repository_encoded:
             print(f'仓库名称转换: {repository} -> {repository_encoded}')
         
@@ -260,10 +288,15 @@ jobs:
             sys.exit(1)
         PYEOF
         SET_PUBLIC_RC=$?
+        set -e
+
         if [ "$SET_PUBLIC_RC" -ne 0 ]; then
-          ERROR_LINE=$(grep '错误信息' /tmp/set-public.log 2>/dev/null | tail -1 || echo "")
-          echo "error_detail=设置仓库为公开失败${ERROR_LINE}" >> $GITHUB_OUTPUT
+          ERROR_LINE=$(grep '错误信息' /tmp/set-public.log 2>/dev/null | tail -1 | sed 's/错误信息: //' || echo "")
+          echo "error_detail=设置仓库为公开失败 - ${ERROR_LINE}" >> $GITHUB_OUTPUT
+          cat /tmp/set-public.log
+          exit 1
         fi
+        echo 'OK 仓库已设置为公开'
     
     - name: Verify Repository is Public
       id: verify-public
@@ -278,11 +311,14 @@ jobs:
         
         # 从目标镜像中提取仓库路径（去除域名和标签）
         REPO_PATH=$(echo ${TARGET_IMAGE} | sed 's|^[^/]*/[^/]*/||' | sed 's/\(.*\):.*/\1/')
+        export REPO_PATH
         
         echo "验证仓库是否为公开: ${REPO_PATH}"
         
         # 使用内联 Python 脚本验证仓库是否为公开
-        python - <<EOF
+        # set +e: 防止 python 失败时 set -e 直接退出，导致 error_detail 无法写入
+        set +e
+        python - > /tmp/verify-public.log 2>&1 <<'PYEOF'
         import os
         import sys
         from huaweicloudsdkcore.auth.credentials import BasicCredentials
@@ -295,7 +331,7 @@ jobs:
         sk = os.environ.get('HUAWEI_CLOUD_SECRET_KEY')
         region = os.environ.get('HUAWEI_SWR_REGION')
         namespace = os.environ.get('HUAWEI_SWR_NAMESPACE')
-        repository = '${REPO_PATH}'
+        repository = os.environ.get('REPO_PATH')
         
         # 验证环境变量
         if not all([ak, sk, region, namespace, repository]):
@@ -304,13 +340,13 @@ jobs:
         
         # 创建客户端
         credentials = BasicCredentials(ak, sk)
-        client = SwrClient.new_builder() \\
-            .with_credentials(credentials) \\
-            .with_region(SwrRegion.value_of(region)) \\
+        client = SwrClient.new_builder() \
+            .with_credentials(credentials) \
+            .with_region(SwrRegion.value_of(region)) \
             .build()
         
         # 华为云 SWR API 要求：仓库名称中的斜杠需要替换为 $
-        repository_encoded = repository.replace('/', '\$')
+        repository_encoded = repository.replace('/', '$')
         if repository != repository_encoded:
             print(f'仓库名称转换: {repository} -> {repository_encoded}')
         
@@ -336,7 +372,17 @@ jobs:
             print(f'状态码: {e.status_code}')
             print(f'错误信息: {e.error_msg}')
             sys.exit(1)
-        EOF
+        PYEOF
+        VERIFY_RC=$?
+        set -e
+        
+        if [ "$VERIFY_RC" -ne 0 ]; then
+          ERROR_LINE=$(grep '错误信息' /tmp/verify-public.log 2>/dev/null | tail -1 | sed 's/错误信息: //' || echo "")
+          echo "error_detail=验证仓库公开状态失败 - ${ERROR_LINE}" >> $GITHUB_OUTPUT
+          cat /tmp/verify-public.log
+          exit 1
+        fi
+        echo "✓ 仓库已验证为公开"
     
     - name: Send Success Notification (WeCom)
       id: send-success
@@ -427,8 +473,11 @@ jobs:
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         
-        # 从步骤 output 读取真实错误信息
-        ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        # 从步骤 output 读取真实错误信息（按执行顺序检查）
+        ERROR_DETAIL="${{ steps.check-image.outputs.error_detail }}"
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        fi
         if [ -z "$ERROR_DETAIL" ]; then
           ERROR_DETAIL="${{ steps.set-public.outputs.error_detail }}"
         fi
@@ -460,8 +509,11 @@ jobs:
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         
-        # 从步骤 output 读取真实错误信息
-        ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        # 从步骤 output 读取真实错误信息（按执行顺序检查）
+        ERROR_DETAIL="${{ steps.check-image.outputs.error_detail }}"
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        fi
         if [ -z "$ERROR_DETAIL" ]; then
           ERROR_DETAIL="${{ steps.set-public.outputs.error_detail }}"
         fi
@@ -494,8 +546,11 @@ jobs:
         set +e
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        # 从步骤 output 读取真实错误信息
-        ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        # 从步骤 output 读取真实错误信息（按执行顺序检查）
+        ERROR_DETAIL="${{ steps.check-image.outputs.error_detail }}"
+        if [ -z "$ERROR_DETAIL" ]; then
+          ERROR_DETAIL="${{ steps.sync-image.outputs.error_detail }}"
+        fi
         if [ -z "$ERROR_DETAIL" ]; then
           ERROR_DETAIL="${{ steps.set-public.outputs.error_detail }}"
         fi

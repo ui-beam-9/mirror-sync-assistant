@@ -150,8 +150,10 @@ case "$STATUS" in
     CONTENT="$CONTENT<div style=\"$INFO_ROW\"><span style=\"$INFO_LABEL\">失败原因</span><span style=\"$INFO_VALUE\">${FAIL_REASON_HTML}</span></div>"
     if [ -n "$LOGS_URL" ]; then
       CONTENT="$CONTENT<a href=\"$LOGS_URL\" style=\"$LINK_BTN\">查看详细日志</a>"
+      CONTENT="$CONTENT<a href=\"$ISSUE_URL\" style=\"${LINK_BTN}margin-left:8px;\">查看 Issue</a>"
+    else
+      CONTENT="$CONTENT<a href=\"$ISSUE_URL\" style=\"$LINK_BTN\">查看 Issue</a>"
     fi
-    CONTENT="$CONTENT<a href=\"$ISSUE_URL\" style=\"$LINK_BTN\">查看 Issue</a>"
     CONTENT="$CONTENT</div></div>"
     ;;
   *)
