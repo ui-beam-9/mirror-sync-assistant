@@ -212,7 +212,7 @@ jobs:
         echo "设置仓库为公开: ${REPO_PATH}"
         
         # 使用内联 Python 脚本设置仓库为公开
-        python - <<EOF
+        python - > /tmp/set-public.log 2>&1 <<'PYEOF'
         import os
         import sys
         from huaweicloudsdkcore.auth.credentials import BasicCredentials
@@ -258,7 +258,12 @@ jobs:
             print(f'状态码: {e.status_code}')
             print(f'错误信息: {e.error_msg}')
             sys.exit(1)
-        EOF
+        PYEOF
+        SET_PUBLIC_RC=$?
+        if [ "$SET_PUBLIC_RC" -ne 0 ]; then
+          ERROR_LINE=$(grep '错误信息' /tmp/set-public.log 2>/dev/null | tail -1 || echo "")
+          echo "error_detail=设置仓库为公开失败${ERROR_LINE}" >> $GITHUB_OUTPUT
+        fi
     
     - name: Verify Repository is Public
       id: verify-public
@@ -418,6 +423,7 @@ jobs:
     - name: Send Failure Notification (WeCom)
       if: failure() && steps.send-success.conclusion != 'success'
       run: |
+        set +e
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         
@@ -434,7 +440,7 @@ jobs:
         fi
         ERROR_MSG="镜像同步失败：${ERROR_DETAIL}"
         
-        curl -X POST "${{ secrets.WECOM_WEBHOOK_URL }}/api/notify" \
+        curl -sS -X POST "${{ secrets.WECOM_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
           -d "{
             \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
@@ -443,11 +449,14 @@ jobs:
             \"image_name\": \"${ORIGIN_IMAGE}\",
             \"error_message\": \"${ERROR_MSG}\",
             \"logs_url\": \"${LOGS_URL}\"
-          }" || echo "发送企业微信通知失败"
+          }"
+        echo "WeCom 通知发送完成"
+        exit 0
 
     - name: Send Failure Notification (Lark)
       if: failure() && steps.send-success.conclusion != 'success'
       run: |
+        set +e
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         
@@ -464,7 +473,7 @@ jobs:
         fi
         ERROR_MSG="镜像同步失败：${ERROR_DETAIL}"
         
-        curl -X POST "${{ secrets.LARK_WEBHOOK_URL }}/api/notify" \
+        curl -sS -X POST "${{ secrets.LARK_WEBHOOK_URL }}/api/notify" \
           -H "Content-Type: application/json" \
           -d "{
             \"secret\": \"${{ secrets.WEBHOOK_SECRET }}\",
@@ -473,13 +482,16 @@ jobs:
             \"image_name\": \"${ORIGIN_IMAGE}\",
             \"error_message\": \"${ERROR_MSG}\",
             \"logs_url\": \"${LOGS_URL}\"
-          }" || echo "发送 Lark 通知失败"
+          }"
+        echo "Lark 通知发送完成"
+        exit 0
 
     - name: Send Web Notification (Failure)
       if: failure() && steps.send-success.conclusion != 'success'
       env:
         BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
       run: |
+        set +e
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         LOGS_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         # 从步骤 output 读取真实错误信息
@@ -494,14 +506,17 @@ jobs:
           ERROR_DETAIL="同步过程中发生未知错误，请查看详细日志"
         fi
         ERROR_MSG="镜像同步失败：${ERROR_DETAIL}"
-        bash .github/scripts/web-notify.sh failure "${{ github.event.issue.number }}" "${ORIGIN_IMAGE}" "" "${ERROR_MSG}" "${LOGS_URL}" \
-          || echo "网页端失败通知发送失败"
+        bash .github/scripts/web-notify.sh failure "${{ github.event.issue.number }}" "${ORIGIN_IMAGE}" "" "${ERROR_MSG}" "${LOGS_URL}"
+        echo "Web 通知发送完成"
+        exit 0
     
     - name: Close Failure Issue
       if: failure() && steps.send-success.conclusion != 'success'
       run: |
+        set +e
         ORIGIN_IMAGE="${{ steps.get-image.outputs.image }}"
         gh issue comment ${{ github.event.issue.number }} -b "镜像 ${ORIGIN_IMAGE} 同步失败[详情请查看](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})<br>请检查 image 是否存在, [查看成功例子](https://github.com/kubesre/docker-registry-mirrors/issues/13)<br>如果需要同步, 请重新提交正确的issue"
         gh issue edit ${{ github.event.issue.number }} --remove-label "syncing"
         gh issue edit ${{ github.event.issue.number }} --add-label "sync image failure" -b "IMAGE SYNC"
         gh issue close ${{ github.event.issue.number }} --reason "not planned"
+        exit 0
